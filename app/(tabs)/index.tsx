@@ -1,70 +1,246 @@
-import { Image, StyleSheet, Platform } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, Button, StyleSheet, ActivityIndicator } from 'react-native';
+import { Audio } from 'expo-av';
+import * as SQLite from 'expo-sqlite';
+import * as FileSystem from 'expo-file-system';
 
-import { HelloWave } from '@/components/HelloWave';
-import ParallaxScrollView from '@/components/ParallaxScrollView';
-import { ThemedText } from '@/components/ThemedText';
-import { ThemedView } from '@/components/ThemedView';
+// Open database synchronously
+const db = SQLite.openDatabase('songs.db');
 
-export default function HomeScreen() {
+export default function App() {
+  const [songs, setSongs] = useState([]);
+  const [currentSongIndex, setCurrentSongIndex] = useState(0);
+  const [sound, setSound] = useState(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    setupAudioMode();
+    setupDatabase();
+    return () => {
+      if (sound) {
+        sound.unloadAsync();
+      }
+    };
+  }, []);
+
+  const setupAudioMode = async () => {
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        staysActiveInBackground: true,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      });
+    } catch (error) {
+      setError('Failed to initialize audio system');
+      console.error(error);
+    }
+  };
+
+  const setupDatabase = () => {
+    db.transaction(
+      tx => {
+        tx.executeSql(
+          `CREATE TABLE IF NOT EXISTS songs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            filePath TEXT NOT NULL UNIQUE
+          );`
+        );
+        tx.executeSql(
+          "SELECT COUNT(*) as count FROM songs;",
+          [],
+          (_, { rows }) => {
+            if (rows._array[0].count === 0) {
+              insertSampleSongs(tx);
+            }
+          }
+        );
+      },
+      error => {
+        setError('Database setup failed');
+        console.error(error);
+      },
+      fetchSongs
+    );
+  };
+
+  const insertSampleSongs = (tx) => {
+    const sampleSongs = [
+      ["Song 1", "Artist 1", "song1.mp3"],
+      ["Song 2", "Artist 2", "song2.mp3"],
+      ["Song 3", "Artist 3", "song3.mp3"]
+    ];
+
+    sampleSongs.forEach(song => {
+      tx.executeSql(
+        "INSERT OR IGNORE INTO songs (title, artist, filePath) VALUES (?, ?, ?);",
+        song,
+        null,
+        (_, error) => console.error('Error inserting song:', error)
+      );
+    });
+  };
+
+  const fetchSongs = () => {
+    db.transaction(tx => {
+      tx.executeSql(
+        "SELECT * FROM songs;",
+        [],
+        (_, { rows }) => {
+          setSongs(rows._array);
+          setIsLoading(false);
+        },
+        (_, error) => {
+          setError('Failed to fetch songs');
+          console.error(error);
+          setIsLoading(false);
+        }
+      );
+    });
+  };
+
+  const playSong = async () => {
+    try {
+      const song = songs[currentSongIndex];
+      if (!song) return;
+
+      setIsLoading(true);
+
+      if (sound) {
+        await sound.unloadAsync();
+      }
+
+      const songPath = FileSystem.documentDirectory + song.filePath;
+      const songExists = await FileSystem.getInfoAsync(songPath);
+      
+      if (!songExists.exists) {
+        throw new Error(`Song file not found: ${song.filePath}`);
+      }
+
+      const { sound: newSound } = await Audio.Sound.createAsync(
+        { uri: songPath },
+        { shouldPlay: true }
+      );
+
+      setSound(newSound);
+      setIsPlaying(true);
+
+      newSound.setOnPlaybackStatusUpdate((status) => {
+        if (status.didJustFinish) {
+          nextSong();
+        }
+      });
+
+    } catch (error) {
+      setError(`Failed to play song: ${error.message}`);
+      console.error(error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const togglePlayPause = async () => {
+    try {
+      if (!sound) {
+        await playSong();
+        return;
+      }
+
+      if (isPlaying) {
+        await sound.pauseAsync();
+      } else {
+        await sound.playAsync();
+      }
+      setIsPlaying(!isPlaying);
+    } catch (error) {
+      setError('Failed to toggle playback');
+      console.error(error);
+    }
+  };
+
+  const nextSong = () => {
+    setCurrentSongIndex((prevIndex) => (prevIndex + 1) % songs.length);
+    playSong();
+  };
+
+  const prevSong = () => {
+    setCurrentSongIndex((prevIndex) => 
+      prevIndex === 0 ? songs.length - 1 : prevIndex - 1
+    );
+    playSong();
+  };
+
+  if (isLoading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" />
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.error}>{error}</Text>
+      </View>
+    );
+  }
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({ ios: 'cmd + d', android: 'cmd + m' })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-        <ThemedText>
-          Tap the Explore tab to learn more about what's included in this starter app.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          When you're ready, run{' '}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+    <View style={styles.container}>
+      {songs.length > 0 ? (
+        <>
+          <Text style={styles.title}>{songs[currentSongIndex].title}</Text>
+          <Text style={styles.artist}>{songs[currentSongIndex].artist}</Text>
+
+          <View style={styles.controls}>
+            <Button title="Previous" onPress={prevSong} />
+            <Button 
+              title={isPlaying ? "Pause" : "Play"} 
+              onPress={togglePlayPause}
+            />
+            <Button title="Next" onPress={nextSong} />
+          </View>
+        </>
+      ) : (
+        <Text style={styles.noSongs}>No songs available</Text>
+      )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
+  container: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
+    padding: 20,
   },
-  stepContainer: {
-    gap: 8,
+  title: {
+    fontSize: 24,
+    fontWeight: 'bold',
     marginBottom: 8,
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  artist: {
+    fontSize: 18,
+    color: '#666',
+    marginBottom: 20,
+  },
+  controls: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  error: {
+    color: 'red',
+    textAlign: 'center',
+  },
+  noSongs: {
+    fontSize: 18,
+    color: '#666',
   },
 });
